@@ -17,11 +17,11 @@ from pycuda.gpuarray import sum as gpusum
 from time import time
 import scipy.ndimage
 
-iterations = 50000
+iterations = 60000
 IM_HALFSIZE = 480	# half the image size to use. Our data is limited to 960x960.
 IM_CENTERY = 498	# XY Center of the image.
 IM_CENTERX = 683
-PerfLevel = 2		# The error will be registered every X iterations. Higher number means better performance.
+PerfLevel = 4		# The error will be registered every X iterations. Higher number means better performance.
 msize = 104		# size of the mask to be used.
 
 Run = 0
@@ -30,11 +30,15 @@ beta = 0.9
 from pycuda.elementwise import ElementwiseKernel
 
 MakeDescent = ElementwiseKernel(
-"pycuda::complex<float> *outsidefft, pycuda::complex<float> *kspace",
+"pycuda::complex<float> *outsidefft, pycuda::complex<float> *kspace, float* prevgrad",
 """
-	pycuda::complex<float> mul = kspace[i]*conj(outsidefft[i]);
-	float dp = 1E-15*mul.imag();
-	kspace[i] *= pycuda::complex<float>(cos(dp),sin(dp));
+	const float momentum = 0.9997f;
+
+	float grad = (kspace[i]*conj(outsidefft[i])).imag();
+	float newgrad = prevgrad[i]*momentum + 1E-14*grad;
+
+	kspace[i] *= pycuda::complex<float>(cos(newgrad),sin(newgrad));
+	prevgrad[i] = newgrad;
 """,
 "MakeDescent",
 preamble="#include <pycuda-complex.hpp>",)
@@ -42,7 +46,7 @@ preamble="#include <pycuda-complex.hpp>",)
 Error = ElementwiseKernel(
 "float* err, pycuda::complex<float> *rspace", 
 """
-	err[i] = abs(rspace[i]*conj(rspace[i]));
+	err[i] = (rspace[i]*conj(rspace[i])).real();
 """,
 "Error",
 preamble="#include <pycuda-complex.hpp>",)
@@ -58,19 +62,28 @@ def SaveImage(fname, Image):
 	Normalized = (255*np.sqrt((1.0/maxv)*absol)).astype(np.uint8)
 	cv2.imwrite(fname+'_grad.png', Normalized)
 	
+def CalcError(rspace,errorR,normal):
+	Error(errorR,rspace)
+	errorF = gpusum(errorR).get()/normal
+	errorF = np.sqrt(errorF)
+	return errorF
+
 def Grad(HDR_FILE_PATH, SAVE_FILES_PATH, Seed):
 	curtime = time()
 	np.random.seed(Seed)
 	
 	rspacelena = np.zeros((512,512),dtype=np.complex64)
-	phase_angle = np.random.rand(rspacelena.shape[0],rspacelena.shape[1]).astype(np.float32) - 0.5
+	phase_angle = np.random.rand(rspacelena.shape[0],rspacelena.shape[1]).astype(np.float32)*3 - 1.5
 
 	Lena = np.asarray(cv2.imread("Lena.png",cv2.IMREAD_GRAYSCALE),dtype=np.float32)[64:192,64:192]
+	plt.subplot(2,2,1)
+	plt.imshow(Lena)
 	rspacelena[128:256,128:256] = Lena[:,:]
 	InvMask = rspacelena == 0
 
 	rspace = gpuarray.to_gpu(rspacelena)
 	kspace = gpuarray.zeros(rspace.shape,dtype=np.complex64)
+	gradp = gpuarray.zeros(rspace.shape,dtype=np.float32)
 	outsidefft = gpuarray.zeros(rspace.shape,dtype=np.complex64)
 	InverseMask = gpuarray.to_gpu(InvMask)
 
@@ -82,42 +95,55 @@ def Grad(HDR_FILE_PATH, SAVE_FILES_PATH, Seed):
 	cu_fft.fft(rspace,kspace,plan_forward)
 	kspace *= gpuarray.to_gpu(np.exp(1j*phase_angle))
 
+	errorF = 0.0
 	errorR = gpuarray.zeros(rspace.shape,np.float32)
 	RfacF = []
 	iter = 1
 	toperr = 1E15
 
+	cu_fft.ifft(kspace,rspace,plan_inverse,True)
+	plt.subplot(2,2,2)
+	plt.imshow(rspace.real.get()[128:256,128:256])
+
+	normal = np.sum(Lena*Lena)
+	rspace = gpuif(InverseMask,rspace,ZeroVector64c)
+	#RfacF.append(CalcError(rspace,errorR,normal))
+
 	print('Init time: ' + str(int(1000*(time()-curtime))) + 'ms')
 	curtime = time()
-
-	normal = np.absolute(rspacelena).sum()
 
 	while (iter < iterations):
 		cu_fft.ifft(kspace,rspace,plan_inverse,True)
 		rspace = gpuif(InverseMask,rspace,ZeroVector64c)
 		cu_fft.fft(rspace,outsidefft,plan_forward)
-		MakeDescent(outsidefft,kspace)
-		Error(errorR,rspace)
-		errorF = gpusum(errorR).get()/normal
+		MakeDescent(outsidefft,kspace,gradp)
+
+		if iter%PerfLevel == 0:
+			errorF = 100.0*CalcError(rspace,errorR,normal)
+			RfacF.append(errorF)
+			toperr = min(toperr,errorF)
 		if iter%1000 == 0:
-			print(errorF)
+			print 'Iter:', iter, '\tError:', str(int(errorF)) + '.' + str(int(10*errorF)%10) + str(int(100*errorF)%10), '%'
 
 		iter = iter + 1
 
 	deltaT = time()-curtime
 	print('')
 	print('Run in: ' + str(int(deltaT)) + 's, at ' + str(int(iterations/deltaT)) + 'ops/s')
-	print(toperr)
+	print 'Best:', toperr
 	
-				
-	SaveImage(SAVE_FILES_PATH + "rspace", rspace.get())
+	cu_fft.ifft(kspace,rspace,plan_inverse,True)
 
-	plt.subplot(1,1,1)
+	plt.subplot(2,2,3)
+	plt.imshow(rspace.__abs__().get()[128:256,128:256])
+
+	plt.subplot(2,2,4)
 	plt.plot(np.asarray(RfacF,dtype=np.float32))
 	plt.ylabel('Fourier R-factor')
 	plt.xlabel('Iteration')
 	plt.tight_layout()
-	plt.savefig(SAVE_FILES_PATH + "ErrorGrad.png",dpi=50)
+	plt.show()
+	#plt.savefig(SAVE_FILES_PATH + "ErrorGrad.png",dpi=50)
 	plt.close()
 
 Grad("Grad","Grad",2)
