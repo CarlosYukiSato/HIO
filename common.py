@@ -3,12 +3,23 @@
 import numpy as np
 from matplotlib.colors import hsv_to_rgb
 import sys
+from decimal import Decimal
+
+def Format(numberin,ndec=2):
+	return ("{:."+str(ndec)+"E}").format(numberin)
+	
+
+def ToPercent(value):
+	if value > 1E-2:
+		return "{:2.2f}".format(100.0*value) + ' %'
+	else:
+		return "{:.2E}".format(value)
 
 def printw(stri):
-	sys.stdout.write('\r' + stri)
+	sys.stdout.write('\r' + str(stri))
 	sys.stdout.flush()
 
-def MakeRGB(Amps,Phases,bias): # Make RGB image from amplitude and phase
+def MakeRGB(Amps,Phases,bias=0): # Make RGB image from amplitude and phase
 	HSV = np.zeros((Amps.shape[0],Amps.shape[1],3),dtype=np.float32)
 	normalizer = (1.0-bias)/Amps.max()
 	HSV[:,:,0] = Phases[:,:]
@@ -20,12 +31,11 @@ def SplitComplex(ComplexImg):
 	Phases = np.angle(ComplexImg)		# Phases in range [-pi,pi]
 	Phases = Phases*0.5/np.pi + 0.5
 	Amps = np.absolute(ComplexImg)
-	Amps /= np.max(Amps) # No particular reason
 	return Amps,Phases
 
-def CMakeRGB(ComplexImg):
+def CMakeRGB(ComplexImg,bias=0.15):
 	Amps,Phases = SplitComplex(ComplexImg)
-	return MakeRGB(Amps,Phases,0.1)
+	return MakeRGB(Amps,Phases,bias)
 
 def Error_real(rspace,Support):
 	rReal = rspace.real**2
@@ -73,5 +83,4 @@ def FixToPad(DifPad,img): # returns fft with the same center and overall sum as 
 	sumdif = np.sum(img)
 	img /= sumdif # Normalize
 	return img
-
 
