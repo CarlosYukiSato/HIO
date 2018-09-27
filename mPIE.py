@@ -5,16 +5,13 @@ from ptychohelper import *
 Implementation of the (e/m/r)PIE algorithm for solving ptychografic phase problem experiments """
 
 np.random.seed(1)
-iPosErrorAmount = 0
-fNoiseLevel = 1.0	# Simulated noise
+iPosErrorAmount = 0	# Simulated position error
+fNoiseLevel = 0.0	# Simulated noise
 iPosCorrection = 0 	# Try to improve ROI positioning by given amount. 0 = Disabled. 1 = recommended.
 
 NumModes = 1 		# Number of probe incoherent modes
 bInteractive = True 	# A pyplot window will be updated every 50 iterations.
 bPhaseShift = False 	# Subpixel shift is considered on each ROI. Mildly expensive.
-PerfLevel = 3 		# update error and probemax every X iterations, higher number = better performance.
-			# For some wierd reason, can improve results (?)
-
 bMakeReset = False 	# Object will be reset to noise every 'resetEvery' iterations.
 bCropObject = True	# Dampen regions of the object not touched by the probe.
 			# /\ Both the above should improve probe estimation.
@@ -23,21 +20,22 @@ bNormalizeEach = False 	# Normalize each probe independently.  	-> ||Pm|| = 1
 bNormalizeAll = False 	# Normalize all probes as one. 		-> sum( ||Pm|| ) = 1
 bOrthogonal = False 	# Impose probes are orthogonal to eachother.
 bRelaxedOrtho = False 	# Impose probes are orthogonal to the first mode only.
+PerfLevel = 3 		# update error and probemax every X iterations, higher number = better performance.
+			# For some wierd reason, can improve results (?)
 
+betaObj = 0.9		# Object update factor.
+betaApert = 0.1		# Probe update factor. 0.0 ~ 0.1 depending on initial probe estimation.
 momentum = 0.9		# < 0.9 for fast convergence, up to ~0.99 for very dificult problems ( requires lots of iterations )
-iterations = 500	# Total number of iterations.
-CropSav = 5/(1-momentum)# Dont crop object at the beginning and end of iterations by this amount.
+iterations = 600	# Total number of iterations.
+
+CropSav = 9/(1-momentum)# Dont crop object at the beginning and end of iterations by this amount.
 crop_factor = 0.99	# Object dampen factor.
-crop_threshold = 0.05	# Threshold for what 'touch' means. When the probe is normalized,
+crop_threshold = 0.04	# Threshold for what 'touch' means. When the probe is normalized,
 			# crop_threshold = 1 -> average ( |probe|**2 ) .
 			
 resetEvery = 100 	# Only if bMakeReset.
-resetTo = 3*resetEvery 	# Last reset, from there on the probe is considered 'final'.
-
-betaObj = 0.9		# Object update factor.
-betaApert = 0.0		# Probe update factor. 0.0 ~ 0.1 depending on initial probe estimation.
-sincguesses = [64] 	# List of initial sinc radius guesses for the probes.
-realsincs = [64] 	# List of sinc radius for difpad calculation
+resetTo = 2*resetEvery 	# Last reset, from there on the probe is considered 'final'.
+originalPIE = np.float32(0.25)	# O += deltaPhi * conj(P) / [ r*|P|^2 + (1-r)|Pmax|^2 ]. =0 -> ePIE, =1 -> PIE.
 
 # Size of the difpad/rspace
 imagApert = np.int32(256) 	# Size of the difpads
@@ -98,7 +96,7 @@ finalModel = LoadExtendedLenaModel() # Get default(ish) simulated model. Replace
 
 # Probes to generate simulated diffraction image. Other commented options below.
 # Circular probes are much easier to solve.
-aperture_cpu = MakeSincApertures(realsincs,imagApert)
+aperture_cpu = MakeSincApertures([64],imagApert)
 #aperture_cpu = MakeGaussApertures(>[sigmas]<,imagApert, optionals: >gaussian threshold<, >[amplitudes]<, >[rolls]<)
 #aperture_cpu = MakeCircApertures(>[diameters]<,imagApert, optionals: >[amplitudes]<, >[rolls]<)
 
@@ -132,9 +130,9 @@ cufftplan = cu_fft.Plan(rspaceShape, np.complex64, np.complex64, batch=NumModes,
 apertMax = 1.0
 ObjMax = farray(nApert)+1.0
 
-# Replace below by the commented line for perfect probe estimation.
-aperture = gpuarray.to_gpu(np.reshape(np.asarray(MakeSincApertures(sincguesses,imagApert)).astype(np.complex64),gpuspaceShape))
-#aperture = gpuarray.to_gpu(np.reshape(np.asarray(aperture_cpu).astype(np.complex64),gpuspaceShape))
+# Uncomment the line below for imperfect initial probe guess. Set bMakeReset=True if necessary.
+#aperture_cpu = MakeCircApertures([64],imagApert)
+aperture = gpuarray.to_gpu(np.reshape(np.asarray(aperture_cpu).astype(np.complex64),gpuspaceShape))
 
 # Send rois for object cropping. You may want to resend them if position correction is enabled.
 roioffsetsgpu = []
@@ -154,7 +152,7 @@ if bInteractive:
 	plt.show()
 		
 while (iter < iterations):
-	if bInteractive and iter%50 == 0:
+	if bInteractive and (iter%100 == 0 or (iter%5 == 0 and iter<40)):
 		plt.subplot(1,2,1)
 		cpuobj = finalObj.__abs__().astype(np.float32).get()
 		#cpuobj[cpuobj>1] = 1
@@ -192,7 +190,7 @@ while (iter < iterations):
 		objsizex = np.int32(np.round(ObjShape[1]))
 
 		# Position Correction, choose random aperture as center
-		if iPosCorrection > 0 and iter>100 and iter <= 2000 and iter%(50*iPosCorrection) == 0 and aper != 12:
+		if iPosCorrection > 0 and iter>100 and iter%(50*iPosCorrection) == 0 and aper != 12:
 			mini,minj = RunCorrection(iPosCorrection,roiList[aper],DifPads[aper],rspace,kspace,exitWave,buffer_exitWave,finalObj,offsetx,offsety,objsizex,roisizex,CopyFromROI,ExitwaveAndBuffer,ApplyDifPad,cufftplan,aperture,fcachevector)
 			
 			# Display pos corrections
@@ -233,7 +231,7 @@ while (iter < iterations):
 			betaAP = np.float32(0)
 
 		# Update exitwave/Probe in rspace and exitwave/rspace in probe
-		UpdateProbeAndRspace(rspace, exitWave, buffer_exitWave, aperture, betaObj, Pmax2, betaAP, Omax2, np.float32(0.25))
+		UpdateProbeAndRspace(rspace, exitWave, buffer_exitWave, aperture, betaObj, Pmax2, betaAP, Omax2, originalPIE)
 		
 		if bPhaseShift:		
 			inplaceFractShift(rspace,roiList[aper][2]-offsetx,roiList[aper][0]-offsety,PhaseShiftFunc)
