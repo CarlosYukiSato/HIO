@@ -151,6 +151,7 @@ def GetDifPads(model, probe, rois, ErrorPercent=20, superres=1, iBinning=1): # 0
 	nPhotons = 0
 	counterR = 0
 	
+	print 'Generating Difpads'
 	for lROI in rois:
 		printw(str(counterR) + ' of ' + str(len(rois)))
 		counterR += 1
@@ -182,7 +183,7 @@ def GetDifPads(model, probe, rois, ErrorPercent=20, superres=1, iBinning=1): # 0
 	if ErrorPercent > 0:
 		expo = int(np.log(nPhotons)/np.log(10))
 		nPhotons = int(nPhotons)//10**expo
-		print 'NPhotons:',nPhotons,'E'+str(expo)
+		print '\nNPhotons:',nPhotons,'E'+str(expo)
 	
 	return DifPads,difpadsums
 
@@ -197,7 +198,7 @@ def LoadLenaModel():
 	BoatLake = 0.2989 * BoatLake[:,:,0] + 0.5870 * BoatLake[:,:,1] + 0.1140 * BoatLake[:,:,2]
 	BoatLake = BoatLake - np.min(BoatLake)
 	BoatLake *= BoatLake
-	BoatLake = 2.0 * BoatLake / np.max(BoatLake) - 1.0
+	BoatLake = 1.0 * BoatLake / np.max(BoatLake) - 0.5
 	del(im)
 
 	return (Lena * np.exp(1j * BoatLake * np.pi)).astype(np.complex64)

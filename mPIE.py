@@ -6,11 +6,11 @@ Implementation of the (e/m/r)PIE algorithm for solving ptychografic phase proble
 
 np.random.seed(1)
 iPosErrorAmount = 0
-fNoiseLevel = 70
+fNoiseLevel = 1.0	# Simulated noise
 iPosCorrection = 0 	# Try to improve ROI positioning by given amount. 0 = Disabled. 1 = recommended.
 
-NumModes = 1 		# Number of probe modes
-bInteractive = True 	# A pyplot window will be updated every 100 iterations.
+NumModes = 1 		# Number of probe incoherent modes
+bInteractive = True 	# A pyplot window will be updated every 50 iterations.
 bPhaseShift = False 	# Subpixel shift is considered on each ROI. Mildly expensive.
 PerfLevel = 3 		# update error and probemax every X iterations, higher number = better performance.
 			# For some wierd reason, can improve results (?)
@@ -19,33 +19,35 @@ bMakeReset = False 	# Object will be reset to noise every 'resetEvery' iteration
 bCropObject = True	# Dampen regions of the object not touched by the probe.
 			# /\ Both the above should improve probe estimation.
 
-bNormalizeEach = True 	# Normalize each probe independently.  	-> ||Pm|| = 1
+bNormalizeEach = False 	# Normalize each probe independently.  	-> ||Pm|| = 1
 bNormalizeAll = False 	# Normalize all probes as one. 		-> sum( ||Pm|| ) = 1
 bOrthogonal = False 	# Impose probes are orthogonal to eachother.
 bRelaxedOrtho = False 	# Impose probes are orthogonal to the first mode only.
 
-momentum = 0.975	# momentum factor for the mPIE algorithm. 0.8 ~ 0.99 depending on the application.
-iterations = 2500	# Total number of iterations.
-resetEvery = 100 	# Only if bMakeReset.
-resetTo = 3*resetEvery 		# Last reset, from there on the probe is considered 'final'.
-CropTo = iterations-500 	# Stop cropping object at.
-LocalCropTo = resetEvery-50 	# Stop cropping the resets at.
+momentum = 0.9		# < 0.9 for fast convergence, up to ~0.99 for very dificult problems ( requires lots of iterations )
+iterations = 500	# Total number of iterations.
+CropSav = 5/(1-momentum)# Dont crop object at the beginning and end of iterations by this amount.
 crop_factor = 0.99	# Object dampen factor.
 crop_threshold = 0.05	# Threshold for what 'touch' means. When the probe is normalized,
 			# crop_threshold = 1 -> average ( |probe|**2 ) .
+			
+resetEvery = 100 	# Only if bMakeReset.
+resetTo = 3*resetEvery 	# Last reset, from there on the probe is considered 'final'.
 
 betaObj = 0.9		# Object update factor.
-betaApert = 0.0		# Probe update factor. Not recommended changing either value.
-sigmathreshold = 0.001	# gaussian threshold. The smaller, the harder it is.
-sincguesses = [64] 	# List of initial sinc radius guesses for the probe(s).
+betaApert = 0.0		# Probe update factor. 0.0 ~ 0.1 depending on initial probe estimation.
+sincguesses = [64] 	# List of initial sinc radius guesses for the probes.
 realsincs = [64] 	# List of sinc radius for difpad calculation
 
 # Size of the difpad/rspace
 imagApert = np.int32(256) 	# Size of the difpads
 imagApert = [imagApert,imagApert]
-roiList = GetRois(9,9,32,imagApert)
-#roiList = GetRois(11,11,33,imagApert) + GetRois(9,9,41,imagApert)
+
+# GetRois(M,N,S,im) = AxB square grid of step size S and difpad size im
+roiList = GetRois(11,11,23,imagApert) + GetRois(9,9,31,imagApert) # Two square grids will avoid artifacts.
 #roiList = GetRois(17,17,37,imagApert) + GetRois(13,13,43,imagApert)
+#roiList = GetRois(9,9,32,imagApert)
+
 ApplyJitter(roiList,10,32) # offset ROI and apply random jitter to avoid artifacts
 
 import matplotlib
@@ -61,7 +63,6 @@ from pycuda.autoinit import context
 import pycuda.gpuarray as gpuarray
 import skcuda.fft as cu_fft
 import skcuda
-from pycuda.gpuarray import sum as gpusum
 from copy import deepcopy
 from ptychoposcorrection import *
 from time import time
@@ -92,12 +93,17 @@ ModeMultiply = Kernels.GetFunction("ModeMultiply")
 NormSquared = Kernels.GetFunction("NormSquared")
 ModeSquared = Kernels.GetFunction("ModeSquared")
 
-finalModel = LoadExtendedLenaModel() # Get default(ish) model. Replace this by your image.
+finalModel = LoadExtendedLenaModel() # Get default(ish) simulated model. Replace this by your image.
+#finalModel = LoadNISTModel() # Another option for a model.
 
-# probes to generate simulated diffraction image
+# Probes to generate simulated diffraction image. Other commented options below.
+# Circular probes are much easier to solve.
 aperture_cpu = MakeSincApertures(realsincs,imagApert)
-#aperture_cpu = [np.load('Medidas/probe0.npy')]
-#aperture_cpu[0] /= np.sqrt(np.sum(abs(aperture_cpu[0])**2))
+#aperture_cpu = MakeGaussApertures(>[sigmas]<,imagApert, optionals: >gaussian threshold<, >[amplitudes]<, >[rolls]<)
+#aperture_cpu = MakeCircApertures(>[diameters]<,imagApert, optionals: >[amplitudes]<, >[rolls]<)
+
+#aperture_cpu = [np.load('Medidas/probe0.npy')] # A propagated diffuser
+#aperture_cpu[0] /= np.sqrt(np.sum(abs(aperture_cpu[0])**2)) # Normalize the previous probe
 
 newroiList, errors = MakePosErrors(roiList,iPosErrorAmount) # Simulate position error by +-iPosErrorAmount
 DifPads,difpadsums = GetDifPads(finalModel,aperture_cpu,newroiList,fNoiseLevel)
@@ -125,9 +131,12 @@ cufftplan = cu_fft.Plan(rspaceShape, np.complex64, np.complex64, batch=NumModes,
 
 apertMax = 1.0
 ObjMax = farray(nApert)+1.0
-#aperture = gpuarray.to_gpu(np.reshape(np.asarray(MakeSincApertures(sincguesses,imagApert)).astype(np.complex64),gpuspaceShape))
-aperture = gpuarray.to_gpu(aperture_cpu[0].astype(np.complex64))
 
+# Replace below by the commented line for perfect probe estimation.
+aperture = gpuarray.to_gpu(np.reshape(np.asarray(MakeSincApertures(sincguesses,imagApert)).astype(np.complex64),gpuspaceShape))
+#aperture = gpuarray.to_gpu(np.reshape(np.asarray(aperture_cpu).astype(np.complex64),gpuspaceShape))
+
+# Send rois for object cropping. You may want to resend them if position correction is enabled.
 roioffsetsgpu = []
 for roi in roiList:
 	roioffsetsgpu.append( [roi[0],roi[2]] )
@@ -148,7 +157,7 @@ while (iter < iterations):
 	if bInteractive and iter%50 == 0:
 		plt.subplot(1,2,1)
 		cpuobj = finalObj.__abs__().astype(np.float32).get()
-		cpuobj[cpuobj>1] = 1
+		#cpuobj[cpuobj>1] = 1
 		plt.imshow(cpuobj)
 		plt.subplot(1,2,2)
 		plt.imshow(aperture.__abs__().astype(np.float32).get())
@@ -167,8 +176,8 @@ while (iter < iterations):
 	if bNormalizeEach:
 		for j in np.int32(range(NumModes)):
 			ModeSquared(aperture, fcachevector)
-			jNorm = np.float32(np.sqrt(1.0/np.sum(fcachevector.get())))
-			ModeMultiply(aperture, j, jNorm)
+			jNorm = np.sqrt(1.0/np.sum(fcachevector.get()))
+			ModeMultiply(aperture, j, np.float32(jNorm))
 	elif bNormalizeAll:
 		NormSquared(aperture, fcachevector)
 		aperture *= np.float32(np.sqrt(1.0/np.sum(fcachevector.get())))
@@ -177,16 +186,17 @@ while (iter < iterations):
 		aper =  apertIndex[cont]
 
 		offsety = np.int32(np.round(roiList[aper][0]))
-		offsetx = np.int32(np.round(roiList[aper][2]))
-		roisizex = np.int32(np.round(roiList[aper][3]-roiList[aper][2]))
-		roisizey = np.int32(np.round(roiList[aper][1]-roiList[aper][0]))
+		offsetx = np.int32(np.round(roiList[aper][2]))  # XY ROI position
+		roisizex = np.int32(np.round(roiList[aper][3]-roiList[aper][2])) # ROI span:  [ofx,ofx+sizex]
+		roisizey = np.int32(np.round(roiList[aper][1]-roiList[aper][0])) # ROI span:  [ofy,ofy+sizey]
 		objsizex = np.int32(np.round(ObjShape[1]))
 
 		# Position Correction, choose random aperture as center
 		if iPosCorrection > 0 and iter>100 and iter <= 2000 and iter%(50*iPosCorrection) == 0 and aper != 12:
 			mini,minj = RunCorrection(iPosCorrection,roiList[aper],DifPads[aper],rspace,kspace,exitWave,buffer_exitWave,finalObj,offsetx,offsety,objsizex,roisizex,CopyFromROI,ExitwaveAndBuffer,ApplyDifPad,cufftplan,aperture,fcachevector)
 			
-			#if mini != 0 or minj != 0: # Display pos corrections
+			# Display pos corrections
+			# if mini != 0 or minj != 0:
 			#	print aper,[mini,minj]
 			
 			if roiList[aper][0] + minj >= 0 and roiList[aper][1] + minj < ObjShape[0]:
@@ -236,7 +246,7 @@ while (iter < iterations):
 		errorF[int(iter-1),aper] = lastError[aper]
 			
 	# Crop object where the probe doesnt touch
-	if bCropObject and iter > 10 and iter < CropTo and (bMakeReset==False or relative_iter < LocalCropTo or iter > resetTo):
+	if bCropObject and iter > CropSav and iter < iterations-CropSav:
 		objsize = np.int32(ObjShape[0]*ObjShape[1])
 		probethresh = np.float32(crop_threshold/roisizex/roisizey)
 		CropObject(aperture, finalObj, roioffsetsgpu, nApert, objsizex, roisizex, probethresh, objsize, np.float32(crop_factor))
@@ -272,17 +282,15 @@ print('')
 curtime = time()-curtime
 print "Done in " + str(int(curtime)) + "." + str(int(curtime*10)%10) + "s"
 	
-quit()
 plt.subplot(2, 2, 1)
 plt.title('Test')
 imgplot = plt.imshow(finalObj.__abs__().get())
 
-#RGB = common.CMakeRGB(finalObj.get())
 plt.subplot(2, 2, 2)
-#imgplot = plt.imshow(RGB)
-imgplot = plt.imshow(np.angle(finalObj.get()))
+imgplot = plt.imshow(np.angle(finalObj.get()))		# Use phase and Hue
+#imgplot = plt.imshow(common.CMakeRGB(finalObj.get())) 	# This is the full HSV version
 
-plt.subplot(2, 2, 3)
+plt.subplot(2, 2, 3) # Only displaying probes amplitude
 plt.imshow( np.reshape(aperture.__abs__().astype(np.float32).get(), (NumModes*roisizey,roisizex)) )
 
 plt.subplot(2, 2, 4)
