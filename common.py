@@ -7,7 +7,6 @@ from decimal import Decimal
 
 def Format(numberin,ndec=2):
 	return ("{:."+str(ndec)+"E}").format(numberin)
-	
 
 def ToPercent(value):
 	if value > 1E-2:
@@ -83,4 +82,41 @@ def FixToPad(DifPad,img): # returns fft with the same center and overall sum as 
 	sumdif = np.sum(img)
 	img /= sumdif # Normalize
 	return img
+	
+def getline(diff,d,size):
+	Border = diff[size-d,:] + diff[size+d,:] + diff[:,size+d] + diff[:,size-d]
+	return Border[size-d:size+d+1]
+	
+def SemiFRC(img1ol,img2ol):
+	size = img1ol.shape[0]//2
+	
+	img1 = np.fft.fftshift(np.fft.fft2(img1ol))
+	img2 = np.fft.fftshift(np.fft.fft2(img2ol))
+
+	mmc = img1*np.conj(img2)
+	sub = (abs(img1) - abs(img2))**2
+	
+	img1 = abs(img1)**2
+	img2 = abs(img2)**2
+	
+	FRC = []
+	SNR = []
+	
+	for d in range(size):
+		FRC.append( np.sum(getline(mmc,d,size))/np.sqrt( np.sum(getline(img1,d,size)) * np.sum(getline(img2,d,size)) ) )
+		SNR.append( np.sum(getline(img1,d,size))/(np.sum(getline(sub,d,size))+1E-20) )
+		
+	SNR = np.log(abs(np.asarray(SNR)))/np.log(10)
+	FRC = abs(np.asarray(FRC))
+	
+	SNR[SNR<0] = 0
+	SNR[SNR>1] = 1
+	
+	return FRC,SNR
+		
+		
+	
+	
+	
+	
 
